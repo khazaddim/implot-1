@@ -1,0 +1,29 @@
+flowchart TD
+    %% Nodes
+        Start([Start: Axis needs time labels])
+        GetUnitForRange["GetUnitForRange(range)<br/>(Line ~857)"]
+        GetTimeFormat["GetDateTimeFmt (for each level)<br/>(Line ~900, uses TimeFormatLevel0/1)"]
+        FloorTime["FloorTime (find first major tick)<br/>(Line ~1082)"]
+        LoopMajorTicks{"For each major tick in range<br/>(Locator_Time loop, Line ~917)"}
+        AddMajorTick["Add major tick (AddTick)<br/>(Line ~933, 944)"]
+        AddMinorTicks{"Add minor ticks between majors?<br/>(Line ~950)"}
+        LoopMinorTicks{"For each minor tick<br/>(Line ~952)"}
+        AddMinorTick["Add minor tick (AddTick)<br/>(Line ~955)"]
+        End([End: All ticks and labels added])
+
+    %% Edge connections between nodes
+        Start --> GetUnitForRange
+        GetUnitForRange --> GetTimeFormat
+        GetTimeFormat --> FloorTime
+        FloorTime --> LoopMajorTicks
+        LoopMajorTicks -->|Yes| AddMajorTick
+        AddMajorTick --> AddMinorTicks
+        AddMinorTicks -->|Yes| LoopMinorTicks
+        LoopMinorTicks --> AddMinorTick
+        AddMinorTick --> LoopMinorTicks
+        LoopMinorTicks -->|No more| LoopMajorTicks
+        AddMinorTicks -->|No| LoopMajorTicks
+        LoopMajorTicks -->|No more| End
+
+
+    %% You can add notes with two "%" signs in a row!
