@@ -1,0 +1,60 @@
+classDiagram
+    class ImPlotTime {
+        +int S
+        +int Us
+        +RollOver()
+        +ToDouble()
+        +FromDouble()
+    }
+    class tm {
+        +int tm_sec
+        +int tm_min
+        +int tm_hour
+        +int tm_mday
+        +int tm_mon
+        +int tm_year
+        +...
+    }
+    class ImPlotDateTimeSpec {
+        +ImPlotDateFmt Date
+        +ImPlotTimeFmt Time
+        +bool UseISO8601
+        +bool Use24HourClock
+    }
+    class ImPlotRange {
+        +double Min
+        +double Max
+        +double Size()
+    }
+    class ImPlotTicker {
+        +AddTick()
+        +GetText()
+    }
+    class Formatter_Time_Data {
+        +ImPlotTime Time
+        +ImPlotDateTimeSpec Spec
+        +ImPlotFormatter UserFormatter
+        +void* UserFormatterData
+    }
+
+    ImPlotTime ..> tm
+    ImPlotTicker ..> Formatter_Time_Data
+    Formatter_Time_Data ..> ImPlotDateTimeSpec
+    ImPlotTicker ..> ImPlotRange
+
+    %% Key functions (not all shown for brevity)
+    ImPlotTime : +MkGmtTime()
+    ImPlotTime : +GetGmtTime()
+    ImPlotTime : +MkLocTime()
+    ImPlotTime : +GetLocTime()
+    ImPlotTime : +MakeTime()
+    ImPlotTime : +AddTime()
+    ImPlotTime : +FloorTime()
+    ImPlotTime : +CeilTime()
+    ImPlotTime : +RoundTime()
+    ImPlotTime : +CombineDateTime()
+    ImPlotTime : +FormatTime()
+    ImPlotTime : +FormatDate()
+    ImPlotTime : +FormatDateTime()
+    ImPlotTime : +GetYear()
+    ImPlotTime : +GetMonth()

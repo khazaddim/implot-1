@@ -853,7 +853,18 @@ void AddTicksCustom(const double* values, const char* const labels[], int n, ImP
 // Time Ticks and Utils
 //-----------------------------------------------------------------------------
 
-// this may not be thread safe?
+// This block implements ImPlot's "time axis" tick/label generator.
+//
+// High-level idea:
+// - Axis values are stored as doubles (seconds since epoch + fractional part).
+// - We choose a suitable unit (us/ms/s/min/hr/day/month/year) based on the
+//   visible range and available pixel width.
+// - We then generate a sequence of tick positions (major + optional minor) and
+//   attach formatted text labels to those ticks via ImPlotTicker::AddTick.
+//
+// Note: This code uses the implicit global ImPlot context (GImPlot) and its
+// shared tm scratch buffer (GImPlot->Tm). That makes it convenient but means
+// the functions below are not guaranteed to be thread-safe.
 static const double TimeUnitSpans[ImPlotTimeUnit_COUNT] = {
     0.000001,
     0.001,
@@ -865,6 +876,10 @@ static const double TimeUnitSpans[ImPlotTimeUnit_COUNT] = {
     31557600
 };
 
+// Chooses a "reasonable" time unit for a given span (in seconds).
+//
+// Locator_Time calls this to decide what unit to use for the top label row
+// (level 0). A second unit (level 1) is derived from it for the bottom row.
 inline ImPlotTimeUnit GetUnitForRange(double range) {
     static double cutoffs[ImPlotTimeUnit_COUNT] = {0.001, 1, 60, 3600, 86400, 2629800, 31557600, IMPLOT_MAX_TIME};
     for (int i = 0; i < ImPlotTimeUnit_COUNT; ++i) {
@@ -874,6 +889,11 @@ inline ImPlotTimeUnit GetUnitForRange(double range) {
     return ImPlotTimeUnit_Yr;
 }
 
+// Helper used by GetTimeStep.
+//
+// Given a maximum desired number of divisions (max_divs) and two lookup tables
+// (divs[] thresholds and step[] corresponding step sizes), return an
+// appropriate step size that keeps the division count under control.
 inline int LowerBoundStep(int max_divs, const int* divs, const int* step, int size) {
     if (max_divs < divs[0])
         return 0;
@@ -884,6 +904,11 @@ inline int LowerBoundStep(int max_divs, const int* divs, const int* step, int si
     return step[size-1];
 }
 
+// Picks a tick step size for a chosen unit, given a maximum number of labels
+// that can fit in the available pixel space.
+//
+// Locator_Time uses this to decide how many minor (level 0) ticks/labels to
+// place between major (level 1) divisions without overcrowding.
 inline int GetTimeStep(int max_divs, ImPlotTimeUnit unit) {
     if (unit == ImPlotTimeUnit_Ms || unit == ImPlotTimeUnit_Us) {
         static const int step[] = {500,250,200,100,50,25,20,10,5,2,1};
@@ -913,6 +938,9 @@ inline int GetTimeStep(int max_divs, ImPlotTimeUnit unit) {
     return 0;
 }
 
+// Convert a broken-down UTC time (tm) into an ImPlotTime.
+//
+// Used by formatting/rounding helpers that need to step in calendar units.
 ImPlotTime MkGmtTime(struct tm *ptm) {
     ImPlotTime t;
 #ifdef _WIN32
@@ -925,6 +953,10 @@ ImPlotTime MkGmtTime(struct tm *ptm) {
     return t;
 }
 
+// Convert an ImPlotTime into broken-down UTC time (tm).
+//
+// This writes into the provided tm pointer. Many time formatting helpers use
+// this to extract Y/M/D/H/M/S fields.
 tm* GetGmtTime(const ImPlotTime& t, tm* ptm)
 {
 #ifdef _WIN32
@@ -937,6 +969,7 @@ tm* GetGmtTime(const ImPlotTime& t, tm* ptm)
 #endif
 }
 
+// Convert a broken-down local time (tm) into an ImPlotTime.
 ImPlotTime MkLocTime(struct tm *ptm) {
     ImPlotTime t;
     t.S = mktime(ptm);
@@ -945,8 +978,13 @@ ImPlotTime MkLocTime(struct tm *ptm) {
     return t;
 }
 
+// Convert an ImPlotTime into broken-down local time (tm).
 tm* GetLocTime(const ImPlotTime& t, tm* ptm) {
 #ifdef _WIN32
+// Q: where is localtime_s defined?
+// A: it's part of the C11 standard library, but on Windows it's available in the MSVC runtime library. You may need to include <time.h> or <ctime> to use it.
+// Q: what does localtime_s do?
+// A: localtime_s is a secure version of the localtime function that converts a time
   if (localtime_s(ptm, &t.S) == 0)
     return ptm;
   else
@@ -956,6 +994,12 @@ tm* GetLocTime(const ImPlotTime& t, tm* ptm) {
 #endif
 }
 
+// Construct an ImPlotTime from calendar fields.
+//
+// Note the normalization: any overflow in microseconds is folded into seconds.
+// This is used for a few tasks:
+// - generating a "worst case" label for width measurement (GetDateTimeWidth)
+// - generating year ticks in the special "unit0 == Year" branch (Locator_Time)
 ImPlotTime MakeTime(int year, int month, int day, int hour, int min, int sec, int us) {
     tm& Tm = GImPlot->Tm;
 
@@ -979,18 +1023,30 @@ ImPlotTime MakeTime(int year, int month, int day, int hour, int min, int sec, in
     return t;
 }
 
+// Extract the calendar year from an ImPlotTime.
+//
+// This goes through tm so it respects calendar rules and time conversion.
 int GetYear(const ImPlotTime& t) {
     tm& Tm = GImPlot->Tm;
     GetTime(t, &Tm);
     return Tm.tm_year + 1900;
 }
 
+// Extract the calendar month from an ImPlotTime (0-11, matching tm.tm_mon).
 int GetMonth(const ImPlotTime& t) {
     tm& Tm = GImPlot->Tm;
     ImPlot::GetTime(t, &Tm);
     return Tm.tm_mon;
 }
 
+// Add a number of units to a time value.
+//
+// For fixed-size units (us/ms/s/min/hr/day) this is simple arithmetic.
+// For calendar units (month/year) we repeatedly convert to tm and step by
+// whole months/years because month length varies.
+// Locator_Time uses this to:
+// - move from one major division boundary to the next
+// - generate minor ticks between major divisions
 ImPlotTime AddTime(const ImPlotTime& t, ImPlotTimeUnit unit, int count) {
     tm& Tm = GImPlot->Tm;
     ImPlotTime t_out = t;
@@ -1023,6 +1079,10 @@ ImPlotTime AddTime(const ImPlotTime& t, ImPlotTimeUnit unit, int count) {
     return t_out;
 }
 
+// Floor a time down to the start of the specified unit.
+//
+// Example: floor-to-day sets hour/min/sec to zero.
+// Locator_Time uses this to find the first aligned major tick boundary.
 ImPlotTime FloorTime(const ImPlotTime& t, ImPlotTimeUnit unit) {
     ImPlotContext& gp = *GImPlot;
     GetTime(t, &gp.Tm);
@@ -1040,10 +1100,12 @@ ImPlotTime FloorTime(const ImPlotTime& t, ImPlotTimeUnit unit) {
     return MkTime(&gp.Tm);
 }
 
+// Ceil a time up to the start of the next unit.
 ImPlotTime CeilTime(const ImPlotTime& t, ImPlotTimeUnit unit) {
     return AddTime(FloorTime(t, unit), unit, 1);
 }
 
+// Round a time to the nearest unit boundary.
 ImPlotTime RoundTime(const ImPlotTime& t, ImPlotTimeUnit unit) {
     ImPlotTime t1 = FloorTime(t, unit);
     ImPlotTime t2 = AddTime(t1,unit,1);
@@ -1052,6 +1114,10 @@ ImPlotTime RoundTime(const ImPlotTime& t, ImPlotTimeUnit unit) {
     return t.S - t1.S < t2.S - t.S ? t1 : t2;
 }
 
+// Combine the date portion of one time with the time-of-day portion of another.
+//
+// This is used by UI pickers and other helpers to mix-and-match user-chosen
+// dates with user-chosen times.
 ImPlotTime CombineDateTime(const ImPlotTime& date_part, const ImPlotTime& tod_part) {
     ImPlotContext& gp = *GImPlot;
     tm& Tm = gp.Tm;
@@ -1073,6 +1139,10 @@ static const char* MONTH_NAMES[]  = {"January","February","March","April","May",
 static const char* WD_ABRVS[]     = {"Su","Mo","Tu","We","Th","Fr","Sa"};
 static const char* MONTH_ABRVS[]  = {"Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"};
 
+// Format the time-of-day portion of an ImPlotTime into a string.
+//
+// The format enum controls granularity (hours only vs hours+min+sec+ms/us).
+// Axis tick labels (via Formatter_Time) ultimately rely on this output.
 int FormatTime(const ImPlotTime& t, char* buffer, int size, ImPlotTimeFmt fmt, bool use_24_hr_clk) {
     tm& Tm = GImPlot->Tm;
     GetTime(t, &Tm);
@@ -1113,6 +1183,11 @@ int FormatTime(const ImPlotTime& t, char* buffer, int size, ImPlotTimeFmt fmt, b
     }
 }
 
+// Format the date portion of an ImPlotTime into a string.
+//
+// Supports two output styles:
+// - "default" (e.g., M/D/Y, Month abbrev)
+// - ISO 8601 variants (e.g., YYYY-MM-DD)
 int FormatDate(const ImPlotTime& t, char* buffer, int size, ImPlotDateFmt fmt, bool use_iso_8601) {
     tm& Tm = GImPlot->Tm;
     GetTime(t, &Tm);
@@ -1142,6 +1217,10 @@ int FormatDate(const ImPlotTime& t, char* buffer, int size, ImPlotDateFmt fmt, b
     }
  }
 
+// Format both date and time into a single label string based on ImPlotDateTimeSpec.
+//
+// Locator_Time chooses an ImPlotDateTimeSpec (fmt0/fmt1/fmtf) and then the tick
+// formatter uses this to write the label into the ticker's text buffer.
 int FormatDateTime(const ImPlotTime& t, char* buffer, int size, ImPlotDateTimeSpec fmt) {
     int written = 0;
     if (fmt.Date != ImPlotDateFmt_None)
@@ -1154,6 +1233,10 @@ int FormatDateTime(const ImPlotTime& t, char* buffer, int size, ImPlotDateTimeSp
     return written;
 }
 
+// Estimate the pixel width of a label for a given date/time spec.
+//
+// Locator_Time uses this to prevent label overlap by computing how many labels
+// can fit between major divisions and whether minor labels should be shown.
 inline float GetDateTimeWidth(ImPlotDateTimeSpec fmt) {
     static const ImPlotTime t_max_width = MakeTime(2888, 12, 22, 12, 58, 58, 888888); // best guess at time that maximizes pixel width
     char buffer[32];
@@ -1161,6 +1244,11 @@ inline float GetDateTimeWidth(ImPlotDateTimeSpec fmt) {
     return ImGui::CalcTextSize(buffer).x;
 }
 
+// Returns true if two label strings share the same suffix.
+//
+// Locator_Time uses this to avoid repeating identical major labels when the
+// chosen formatting would produce duplicates (e.g., date labels that don't
+// change between adjacent major ticks).
 inline bool TimeLabelSame(const char* l1, const char* l2) {
     size_t len1 = strlen(l1);
     size_t len2 = strlen(l2);
@@ -1168,6 +1256,13 @@ inline bool TimeLabelSame(const char* l1, const char* l2) {
     return strcmp(l1 + len1 - n, l2 + len2 - n) == 0;
 }
 
+// Default formatting presets for the two-level time axis.
+//
+// Locator_Time uses two label rows:
+// - Level 0: more frequent (minor) labels, finer-grained.
+// - Level 1: less frequent (major) labels, coarser-grained.
+//
+// The arrays below map from ImPlotTimeUnit -> (date fmt, time fmt).
 static const ImPlotDateTimeSpec TimeFormatLevel0[ImPlotTimeUnit_COUNT] = {
     ImPlotDateTimeSpec(ImPlotDateFmt_None,  ImPlotTimeFmt_Us),
     ImPlotDateTimeSpec(ImPlotDateFmt_None,  ImPlotTimeFmt_SMs),
@@ -1220,64 +1315,156 @@ inline ImPlotDateTimeSpec GetDateTimeFmt(const ImPlotDateTimeSpec* ctx, ImPlotTi
     return fmt;
 }
 
+// Main tick locator for time axes.
+//
+// Input:
+// - range: visible axis range in seconds (double).
+// - pixels: drawable pixel width along the axis.
+// - ticker: output container. This function appends tick positions and labels.
+//
+// Output:
+// - Populates `ticker.Ticks` and `ticker.TextBuffer` via ticker.AddTick(...).
+//
+// How it stays "optimized":
+// - Chooses units and formats based on the range.
+// - Computes label widths to cap density.
+// - Generates aligned major ticks plus optional minor ticks.
+// - Hides repeated major labels using TimeLabelSame.
 void Locator_Time(ImPlotTicker& ticker, const ImPlotRange& range, float pixels, bool vertical, ImPlotFormatter formatter, void* formatter_data) {
     IM_ASSERT_USER_ERROR(vertical == false, "Cannot locate Time ticks on vertical axis!");
     (void)vertical;
-    // get units for level 0 and level 1 labels
+
+    // STEP 0: Choose units for the two label "levels".
+    //
+    // ImPlot draws up to two rows of time labels:
+    // - level 0 (top): finer-grained labels (potentially many)
+    // - level 1 (bottom): coarser-grained labels (fewer, act as "major" dividers)
+    //
+    // Heuristic: compute the visible span per ~100 pixels and pick a unit that
+    // makes sense for that density.
+    //
+    // Python mapping idea:
+    //   seconds_per_100px = (range_max - range_min) / (pixels / 100)
+    //   unit0 = unit_for_span(seconds_per_100px)
+    //   unit1 = clamp(unit0 + 1)
     const ImPlotTimeUnit unit0 = GetUnitForRange(range.Size() / (pixels / 100)); // level = 0 (top)
     const ImPlotTimeUnit unit1 = ImClamp(unit0 + 1, 0, ImPlotTimeUnit_COUNT-1);  // level = 1 (bottom)
-    // get time format specs
+
+    // STEP 1: Pick formatting specs for each label level.
+    //
+    // fmt0: formatting used for level 0 labels
+    // fmt1: formatting used for level 1 labels after the first major
+    // fmtf: formatting used for the first level 1 label (usually includes extra context)
     const ImPlotDateTimeSpec fmt0 = GetDateTimeFmt(TimeFormatLevel0, unit0);
     const ImPlotDateTimeSpec fmt1 = GetDateTimeFmt(TimeFormatLevel1, unit1);
     const ImPlotDateTimeSpec fmtf = GetDateTimeFmt(TimeFormatLevel1First, unit1);
-    // min max times
+
+    // STEP 2: Convert the visible range (double seconds) to ImPlotTime for
+    // calendar-aware stepping/comparisons.
     const ImPlotTime t_min = ImPlotTime::FromDouble(range.Min);
     const ImPlotTime t_max = ImPlotTime::FromDouble(range.Max);
-    // maximum allowable density of labels
+
+    // STEP 3: Label density control.
+    //
+    // max_density is a tuning factor: smaller -> fewer labels (more whitespace).
+    // A value of 0.5 roughly means "at most half of the available space should
+    // be occupied by labels" when estimating fit.
     const float max_density = 0.5f;
-    // book keeping
+
+    // STEP 4: Bookkeeping for suppressing duplicate major labels.
+    // last_major_offset stores the text offset of the last major label placed
+    // into ticker.TextBuffer, so we can compare suffixes and hide repeats.
     int last_major_offset = -1;
-    // formatter data
+
+    // STEP 5: Set up formatter payload.
+    //
+    // The actual label text is produced by Formatter_Time (internal), which in
+    // turn uses this struct (time + selected format spec). The user-supplied
+    // formatter (if any) is also kept here and can override behavior.
     Formatter_Time_Data ftd;
     ftd.UserFormatter = formatter;
     ftd.UserFormatterData = formatter_data;
+
+    // STEP 6: Main generation paths.
+    //
+    // Most units use a "major divisions" loop (unit1) with optional "minor"
+    // labels (unit0) between majors. A dedicated path exists for year-scale
+    // ranges to generate "nice" year steps.
     if (unit0 != ImPlotTimeUnit_Yr) {
-        // pixels per major (level 1) division
+
+        // STEP 6a: Compute how much pixel space a single major division spans.
+        //
+        // A major division is 1 * TimeUnitSpans[unit1] seconds wide.
+        // pix_per_major_div = pixels * (major_span_seconds / total_span_seconds)
         const float pix_per_major_div = pixels / (float)(range.Size() / TimeUnitSpans[unit1]);
-        // nominal pixels taken up by labels
+
+        // STEP 6b: Estimate label widths in pixels (worst-case) for each spec.
+        // These widths drive how many labels we can place without overlap.
         const float fmt0_width = GetDateTimeWidth(fmt0);
         const float fmt1_width = GetDateTimeWidth(fmt1);
         const float fmtf_width = GetDateTimeWidth(fmtf);
-        // the maximum number of minor (level 0) labels that can fit between major (level 1) divisions
+
+        // STEP 6c: Decide how many minor labels can fit between majors.
+        // minor_per_major is essentially: how many fmt0-sized labels fit in a major division.
         const int   minor_per_major   = (int)(max_density * pix_per_major_div / fmt0_width);
-        // the minor step size (level 0)
+
+        // STEP 6d: Convert that count into a discrete step size for unit0.
+        // Example: for milliseconds it might choose steps like 500ms, 200ms, 50ms, etc.
         const int step = GetTimeStep(minor_per_major, unit0);
-        // generate ticks
+
+        // STEP 6e: Find the first major boundary (aligned to unit1) at or before range.Min.
+        // We'll walk forward in unit1 increments, emitting ticks that fall inside [t_min, t_max].
         ImPlotTime t1 = FloorTime(ImPlotTime::FromDouble(range.Min), unit1);
         while (t1 < t_max) {
-            // get next major
+
+            // t1 is current major boundary; t2 is next major boundary.
             const ImPlotTime t2 = AddTime(t1, unit1, 1);
-            // add major tick
+
+            // STEP 6f: Emit ticks at the major boundary (if visible).
+            //
+            // Important: this code emits *two* ticks at the same x-position:
+            // - a level 0 tick (top row) using fmt0
+            // - a level 1 tick (bottom row) using fmtf/fmt1
+            //
+            // The ticker holds both levels and the renderer draws them separately.
             if (t1 >= t_min && t1 <= t_max) {
-                // minor level 0 tick
+
+                // Level 0 (top) tick at the major boundary: always labeled.
                 ftd.Time = t1; ftd.Spec = fmt0;
                 ticker.AddTick(t1.ToDouble(), true, 0, true, Formatter_Time, &ftd);
-                // major level 1 tick
+
+                // Level 1 (bottom) tick at the same position.
+                // First major uses fmtf (more context); subsequent majors use fmt1.
                 ftd.Time = t1; ftd.Spec = last_major_offset < 0 ? fmtf : fmt1;
                 ImPlotTick& tick_maj = ticker.AddTick(t1.ToDouble(), true, 1, true, Formatter_Time, &ftd);
                 const char* this_major = ticker.GetText(tick_maj);
+
+                // If two adjacent major labels would render the same (or same suffix), hide one.
+                // This reduces visual noise when the chosen format doesn't change between majors.
                 if (last_major_offset >= 0 && TimeLabelSame(ticker.TextBuffer.Buf.Data + last_major_offset, this_major))
                     tick_maj.ShowLabel = false;
                 last_major_offset = tick_maj.TextOffset;
             }
-            // add minor ticks up until next major
+
+            // STEP 6g: Emit minor (level 0) ticks inside (t1, t2).
+            //
+            // Two key heuristics here:
+            // - Only consider minor labels if we think more than 1 will fit.
+            // - Decide per-tick whether to show its label based on remaining pixel space
+            //   before the next major boundary.
             if (minor_per_major > 1 && (t_min <= t2 && t1 <= t_max)) {
                 ImPlotTime t12 = AddTime(t1, unit0, step);
                 while (t12 < t2) {
+                    // px_to_t2 estimates the remaining pixel space from this minor tick to the next major.
+                    // If there isn't enough room for a full label, we still add the tick but hide its label.
                     float px_to_t2 = (float)((t2 - t12).ToDouble()/range.Size()) * pixels;
                     if (t12 >= t_min && t12 <= t_max) {
                         ftd.Time = t12; ftd.Spec = fmt0;
                         ticker.AddTick(t12.ToDouble(), false, 0, px_to_t2 >= fmt0_width, Formatter_Time, &ftd);
+
+                        // Special case: if we haven't placed a major label yet (last_major_offset < 0),
+                        // we may place the first major label at a minor tick, *if* there's enough
+                        // visual room for it.
                         if (last_major_offset < 0 && px_to_t2 >= fmt0_width && px_to_t2 >= (fmt1_width + fmtf_width) / 2) {
                             ftd.Time = t12; ftd.Spec = fmtf;
                             ImPlotTick& tick_maj = ticker.AddTick(t12.ToDouble(), true, 1, true, Formatter_Time, &ftd);
@@ -1291,6 +1478,11 @@ void Locator_Time(ImPlotTicker& ticker, const ImPlotRange& range, float pixels, 
         }
     }
     else {
+        // STEP 7: Year-scale special case.
+        //
+        // When unit0 is years, the desired behavior is "nice" year labels (e.g., every 1, 2, 5, 10 years)
+        // rather than stepping by a fixed number of seconds. This branch estimates how many labels can fit,
+        // computes a nice interval, then emits year ticks.
         const ImPlotDateTimeSpec fmty = GetDateTimeFmt(TimeFormatLevel0, ImPlotTimeUnit_Yr);
         const float label_width = GetDateTimeWidth(fmty);
         const int   max_labels  = (int)(max_density * pixels / label_width);
