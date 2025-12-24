@@ -77,12 +77,32 @@ MONTH_ABRVS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "O
 # Data structures
 # -----------------------------
 
+# These dataclasses mirror a small subset of ImPlot's internal time types.
+# They are intentionally tiny and immutable (frozen=True) so they are safe to
+# pass around and compare/sort without worrying about accidental mutation.
+
 @dataclass(frozen=True, order=True)
 class ImPlotTime:
-    """Two-part timestamp: whole seconds + microseconds."""
+    """Two-part timestamp used throughout the locator.
 
-    S: int
-    Us: int = 0
+    Shape
+    -----
+    - `S`: whole seconds since Unix epoch (int)
+    - `Us`: microseconds offset within the second (int)
+
+    Invariants
+    ----------
+    `Us` is normalized in `__post_init__` such that `0 <= Us < 1_000_000`.
+
+    Notes
+    -----
+    - `frozen=True` makes instances effectively immutable; `__post_init__`
+        uses `object.__setattr__` to normalize fields during construction.
+    - `order=True` enables sorting/comparisons by (S, Us).
+    """
+
+    S: int          # Whole seconds since epoch.
+    Us: int = 0     # Microseconds within the current second (normalized).
 
     def __post_init__(self) -> None:
         # normalize so 0 <= Us < 1_000_000
@@ -114,7 +134,17 @@ class ImPlotTime:
 
 @dataclass(frozen=True)
 class DateTimeSpec:
-    """Equivalent to ImPlotDateTimeSpec (date format + time format)."""
+    """Formatting preset for date/time labels (ImPlotDateTimeSpec equivalent).
+
+    Shape
+    -----
+    - `date_fmt`: one of the DATE_* constants (controls the date portion)
+    - `time_fmt`: one of the TIMEFMT_* constants (controls the time portion)
+    - `use_24_hour` / `use_iso8601`: optional style overrides
+
+    These are used as presets in `TIME_FORMAT_LEVEL0/1` and then combined with
+    the runtime `use_24_hour` / `use_iso8601` arguments when formatting.
+    """
 
     date_fmt: int
     time_fmt: int
@@ -124,6 +154,16 @@ class DateTimeSpec:
 
 @dataclass(frozen=True)
 class Tick:
+    """A single tick produced by `locator_time`.
+
+    Shape
+    -----
+    - `pos`: tick position as Unix timestamp in seconds (float)
+    - `level`: label row (0 = minor/top, 1 = major/bottom)
+    - `major`: whether this tick is a major division boundary
+    - `show_label`: whether a label should be drawn
+    - `label`: the formatted label text, or None if hidden
+    """
     pos: float
     level: int           # 0 or 1
     major: bool
