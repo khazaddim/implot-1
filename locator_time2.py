@@ -36,6 +36,7 @@ from dataclasses import dataclass
 import calendar
 import math
 import time
+from functools import lru_cache
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 
@@ -557,12 +558,68 @@ def time_label_same_suffix(l1: str, l2: str) -> bool:
     return l1[-n:] == l2[-n:]
 
 
-def estimate_label_width_px(spec: DateTimeSpec, *, char_px: float, use_local_time: bool, use_24_hour: bool, use_iso8601: bool) -> float:
+def estimate_label_width_px(
+    spec: DateTimeSpec,
+    *,
+    char_px: float,
+    use_local_time: bool,
+    use_24_hour: bool,
+    use_iso8601: bool,
+    measure_text_width_px: Optional[Callable[[str], float]] = None,
+    _width_cache: Optional[dict[tuple[DateTimeSpec, bool, bool, bool], float]] = None,
+) -> float:
     # Mimic ImPlot's "t_max_width" trick: pick a timestamp likely to yield wide strings.
     # ImPlot uses: MakeTime(2888,12,22,12,58,58,888888)
+    cache_key = (spec, use_local_time, use_24_hour, use_iso8601)
+    if _width_cache is not None:
+        cached = _width_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
     t = make_time(2888, 11, 22, 12, 58, 58, 888888, use_local_time=use_local_time)
     s = format_datetime(t, spec, use_local_time=use_local_time, use_24_hour=use_24_hour, use_iso8601=use_iso8601)
-    return max(1.0, len(s) * char_px)
+
+    if measure_text_width_px is not None:
+        width = float(measure_text_width_px(s))
+    else:
+        width = float(len(s)) * float(char_px)
+
+    width = max(1.0, width)
+    if _width_cache is not None:
+        _width_cache[cache_key] = width
+    return width
+
+
+def make_pil_text_width_measurer(font_path: str, font_size_px: int) -> Callable[[str], float]:
+    """Create a fast text-width measurer using PIL's FreeType metrics.
+
+    This is intended to approximate ImGui::CalcTextSize(...).x using the same
+    font file your DearCyGui app uses.
+
+    Notes
+    -----
+    - Requires Pillow (PIL). If you don't want a hard dependency, create the
+      measurer in your UI layer and pass it into `TimeAxisLocator`.
+    - `font_size_px` must match the font size used to render axis labels,
+      otherwise the measured widths won't match what users see.
+    """
+
+    try:
+        from PIL import ImageFont  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError(
+            "Pillow (PIL) is required for PIL-based text measurement. "
+            "Install it (pip install pillow) or use the char_px estimator."
+        ) from exc
+
+    font = ImageFont.truetype(font_path, int(font_size_px))
+
+    @lru_cache(maxsize=2048)
+    def measure(text: str) -> float:
+        bbox = font.getbbox(text)
+        return float(bbox[2] - bbox[0])
+
+    return measure
 
 
 # -----------------------------
@@ -579,6 +636,8 @@ def locator_time(
     use_iso8601: bool = False,
     max_density: float = 0.5,
     char_px: float = 7.0,
+    measure_text_width_px: Optional[Callable[[str], float]] = None,
+    _width_cache: Optional[dict[tuple[DateTimeSpec, bool, bool, bool], float]] = None,
 ) -> List[Tick]:
     """Python port of ImPlot::Locator_Time.
 
@@ -637,9 +696,33 @@ def locator_time(
         pix_per_major_div = float(pixels) / (span / TIME_UNIT_SPANS[unit1])
 
         # estimate label widths
-        fmt0_width = estimate_label_width_px(fmt0, char_px=char_px, use_local_time=use_local_time, use_24_hour=use_24_hour, use_iso8601=use_iso8601)
-        fmt1_width = estimate_label_width_px(fmt1, char_px=char_px, use_local_time=use_local_time, use_24_hour=use_24_hour, use_iso8601=use_iso8601)
-        fmtf_width = estimate_label_width_px(fmtf, char_px=char_px, use_local_time=use_local_time, use_24_hour=use_24_hour, use_iso8601=use_iso8601)
+        fmt0_width = estimate_label_width_px(
+            fmt0,
+            char_px=char_px,
+            use_local_time=use_local_time,
+            use_24_hour=use_24_hour,
+            use_iso8601=use_iso8601,
+            measure_text_width_px=measure_text_width_px,
+            _width_cache=_width_cache,
+        )
+        fmt1_width = estimate_label_width_px(
+            fmt1,
+            char_px=char_px,
+            use_local_time=use_local_time,
+            use_24_hour=use_24_hour,
+            use_iso8601=use_iso8601,
+            measure_text_width_px=measure_text_width_px,
+            _width_cache=_width_cache,
+        )
+        fmtf_width = estimate_label_width_px(
+            fmtf,
+            char_px=char_px,
+            use_local_time=use_local_time,
+            use_24_hour=use_24_hour,
+            use_iso8601=use_iso8601,
+            measure_text_width_px=measure_text_width_px,
+            _width_cache=_width_cache,
+        )
 
         minor_per_major = int(max_density * pix_per_major_div / fmt0_width)
         step = get_time_step(minor_per_major, unit0)
@@ -692,7 +775,15 @@ def locator_time(
     else:
         # Year-scale special case: choose a "nice" year interval.
         fmty = TIME_FORMAT_LEVEL0[TIME_YR]
-        label_width = estimate_label_width_px(fmty, char_px=char_px, use_local_time=use_local_time, use_24_hour=use_24_hour, use_iso8601=use_iso8601)
+        label_width = estimate_label_width_px(
+            fmty,
+            char_px=char_px,
+            use_local_time=use_local_time,
+            use_24_hour=use_24_hour,
+            use_iso8601=use_iso8601,
+            measure_text_width_px=measure_text_width_px,
+            _width_cache=_width_cache,
+        )
         max_labels = int(max_density * float(pixels) / label_width)
         max_labels = max(2, max_labels)  # avoid division by zero
 
@@ -717,6 +808,105 @@ def locator_time(
             y += step
 
     return ticks
+
+
+class TimeAxisLocator:
+    """Reusable time-axis locator intended for DearCyGui callbacks.
+
+    Motivation
+    ----------
+    In ImPlot, label widths are measured using the actual font metrics
+    (ImGui::CalcTextSize). In a DearCyGui app you typically know the font file
+    and font size used for axis labels.
+
+    This class lets you:
+    - load the font once (optional, via Pillow)
+    - cache worst-case label width estimates across calls
+    - expose a small `__call__` you can use as a zoom/pan callback
+    """
+
+    def __init__(
+        self,
+        *,
+        use_local_time: bool = False,
+        use_24_hour: bool = False,
+        use_iso8601: bool = False,
+        max_density: float = 0.5,
+        char_px: float = 7.0,
+        measure_text_width_px: Optional[Callable[[str], float]] = None,
+        font_path: Optional[str] = None,
+        font_size_px: Optional[int] = None,
+        prewarm: bool = True,
+    ) -> None:
+        self.use_local_time = bool(use_local_time)
+        self.use_24_hour = bool(use_24_hour)
+        self.use_iso8601 = bool(use_iso8601)
+        self.max_density = float(max_density)
+        self.char_px = float(char_px)
+
+        if measure_text_width_px is not None:
+            self.measure_text_width_px = measure_text_width_px
+        elif font_path is not None and font_size_px is not None:
+            self.measure_text_width_px = make_pil_text_width_measurer(font_path, int(font_size_px))
+        else:
+            self.measure_text_width_px = None
+
+        self._width_cache: dict[tuple[DateTimeSpec, bool, bool, bool], float] = {}
+
+        if prewarm:
+            self._prewarm_width_cache()
+
+    def _prewarm_width_cache(self) -> None:
+        # Precompute the small fixed set of widths that ImPlot also uses
+        # (fmt0/fmt1/fmtf for each unit), for this instance's style toggles.
+        for spec in (
+            *TIME_FORMAT_LEVEL0,
+            *TIME_FORMAT_LEVEL1,
+            *TIME_FORMAT_LEVEL1_FIRST,
+        ):
+            estimate_label_width_px(
+                spec,
+                char_px=self.char_px,
+                use_local_time=self.use_local_time,
+                use_24_hour=self.use_24_hour,
+                use_iso8601=self.use_iso8601,
+                measure_text_width_px=self.measure_text_width_px,
+                _width_cache=self._width_cache,
+            )
+
+    def __call__(
+        self,
+        t_min: float,
+        t_max: float,
+        pixels: float,
+        *,
+        use_local_time: Optional[bool] = None,
+        use_24_hour: Optional[bool] = None,
+        use_iso8601: Optional[bool] = None,
+        max_density: Optional[float] = None,
+        char_px: Optional[float] = None,
+    ) -> List[Tick]:
+        # Allow per-call overrides while keeping the fast cached defaults.
+        use_local_time_v = self.use_local_time if use_local_time is None else bool(use_local_time)
+        use_24_hour_v = self.use_24_hour if use_24_hour is None else bool(use_24_hour)
+        use_iso8601_v = self.use_iso8601 if use_iso8601 is None else bool(use_iso8601)
+        max_density_v = self.max_density if max_density is None else float(max_density)
+        char_px_v = self.char_px if char_px is None else float(char_px)
+
+        # If any style toggle changes vs the instance default, caching still works
+        # (keys include toggles), but prewarming won't have covered it.
+        return locator_time(
+            t_min,
+            t_max,
+            pixels,
+            use_local_time=use_local_time_v,
+            use_24_hour=use_24_hour_v,
+            use_iso8601=use_iso8601_v,
+            max_density=max_density_v,
+            char_px=char_px_v,
+            measure_text_width_px=self.measure_text_width_px,
+            _width_cache=self._width_cache,
+        )
 
 
 # -----------------------------
